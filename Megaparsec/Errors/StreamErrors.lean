@@ -1,53 +1,61 @@
 import Megaparsec.Errors
-import Megaparsec.Stream
-
+import Megaparsec.Errors.ParseError
 import YatimaStdLib
+import Straume.Iterator
+import Megaparsec.Ok
+import Megaparsec.Err
 
-namespace StreamErrors
+open Straume.Iterator (Iterable)
+open Megaparsec.Errors
+open Megaparsec.Errors.ParseError
+open Megaparsec.Ok
+open Megaparsec.Err
 
-inductive ParseError (E: Type) [stream: Stream.Stream S] where
-| trivial (offset: Nat)
-          (unexpected: Option (Errors.ErrorItem (stream.Token)))
-          (expected: List (Errors.ErrorItem (stream.Token)))
-| fancy (offset: Nat) (expected: List (Errors.ErrorFancy E))
+namespace Megaparsec.Errors.StreamErrors
 
-def errorOffset [s: Stream.Stream S] (e: @ParseError S E s) : ℕ :=
-  match e with
-    | ParseError.trivial n _ _ => n
-    | ParseError.fancy n _     => n
+universe u
 
-def mergeError [s: Stream.Stream S]
-               [Ord (Stream.Stream.Token S)]
-               [BEq (Stream.Stream.Token S)]
-               (e₁: @ParseError S E s)
-               (e₂: @ParseError S E s) : @ParseError S E s :=
-  match (compare (@errorOffset S E s e₁) (@errorOffset S E s e₂)) with
+/- Merge errors produced by alternative parsers.
+Strategy:
+
+1. If the errors have the same offset, keep fancy.
+2. If both are fancy, merge the collections of ErrorFancy in each.
+3. If both are trivial carrying some information, pick one based on the optional eiMax funciton.
+   The first one is picked by default.
+2. Otherwise, discard the error with the lowest offset.
+   It doesn't matter, because the alternative choice of parsers is eager.
+
+
+The error with the state with the longest match is topped with the messages from the "shortest" state.
+The error with the "shortest" state is discarded. -/
+def mergeErrors (e₁: ParseError β E)
+                (e₂: ParseError β E)
+                (eiMax : ErrorItem β → ErrorItem β → ErrorItem β := fun x _ => x) : ParseError β E :=
+  match (compare (errorOffset e₁) (errorOffset e₂)) with
     | Ordering.lt => e₂
     | Ordering.eq =>
         match (e₁, e₂) with
-          | (ParseError.trivial s₁ u₁ p₁, ParseError.trivial _ u₂ p₂) =>
+          | (ParseError.trivial s₁ u₁ p₁, .trivial _ u₂ p₂) =>
              match (u₁, u₂) with
-               | (Option.none, Option.none) => ParseError.trivial s₁ Option.none (p₁ ++ p₂)
-               | (Option.some x, Option.some y) => ParseError.trivial s₁ (Option.some (Errors.errorItemMax x y)) (p₁ ++ p₂)
-               | (Option.none, Option.some x) => ParseError.trivial s₁ (Option.some x) (p₁ ++ p₂)
-               | (Option.some x, Option.none)=> ParseError.trivial s₁ (Option.some x) (p₁ ++ p₂)
-          | (ParseError.fancy _ _, ParseError.trivial _ _ _) => e₁
-          | (ParseError.trivial _ _ _, ParseError.fancy _ _) => e₂
-          | (ParseError.fancy s₁ x₁, ParseError.fancy _ x₂) => ParseError.fancy s₁ (x₁ ++ x₂)
+               | (.none, .none) => .trivial s₁ .none $ mergeSetsAny p₁ p₂
+               | (.some x, .some y) => .trivial s₁ (.some (eiMax x y)) $ mergeSetsAny p₁ p₂
+               | (.none, .some x) => .trivial s₁ (.some x) $ mergeSetsAny p₁ p₂
+               | (.some x, .none)=> .trivial s₁ (.some x) $ mergeSetsAny p₁ p₂
+          | (.fancy _ _, .trivial _ _ _) => e₁
+          | (.trivial _ _ _, .fancy _ _) => e₂
+          | (.fancy s₁ x₁, .fancy _ x₂) => .fancy s₁ $ mergeSetsAny x₁ x₂
     | Ordering.gt => e₁
 
-def toHints [s : Stream.Stream S] (streamPos : ℕ) (e : @ParseError S E s) : Errors.Hints s.Token :=
+def toHints (streamPos : Nat) (e : ParseError β E) : Hints β :=
   match e with
     | ParseError.fancy _ _ => []
     | ParseError.trivial errOffset _ ps =>
         if streamPos == errOffset
-           then (if List.isEmpty ps then [] else [ps])
+           then (if ps.isEmpty then [] else [ps.toList])
            else []
 
-def refreshLastHint (h : Errors.Hints T) (m : Option (Errors.ErrorItem T)) : Errors.Hints T :=
-  match (h,m) with
+def refreshLastHint (h : Hints β) (m : Option (ErrorItem β)) : Hints β :=
+  match (h, m) with
     | ([], _h) => []
-    | (_ :: xs, Option.none) => xs
-    | (_ :: xs, Option.some y) => [y] :: xs
-
-end StreamErrors
+    | (_ :: xs, .none) => xs
+    | (_ :: xs, .some y) => [y] :: xs
